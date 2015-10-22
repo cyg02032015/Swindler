@@ -67,7 +67,9 @@ public class UIElement {
   ///
   /// Does not include parameterized attributes.
   public func attributes() throws -> [Attribute] {
-    return try attributesAsStrings().flatMap({ Attribute(rawValue: $0) })
+    let attrs = try attributesAsStrings()
+    for attr in attrs where Attribute(rawValue: attr) == nil { print("Unrecognized attribute: \(attr)") }
+    return attrs.flatMap({ Attribute(rawValue: $0) })
   }
 
   // This version is named differently so the caller doesn't have to specify the return type when

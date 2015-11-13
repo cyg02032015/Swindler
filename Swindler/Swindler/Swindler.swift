@@ -6,20 +6,20 @@ public protocol StateType {
 public protocol WindowType {
   var valid: Bool { get }
 
-  var pos: CGPoint { get set }
-  var size: CGSize { get set }
-  var rect: CGRect { get set }
+  var pos: WriteableProperty<CGPoint> { get }
+  var size: WriteableProperty<CGSize> { get }
+//  var rect: CGRect { get set }
 
-  var title: String { get }
+  var title: Property<String> { get }
 }
 
 extension WindowType {
   // Convenience parameter
   var rect: CGRect {
-    get { return CGRect(origin: pos, size: size) }
+    get { return CGRect(origin: pos.value, size: size.value) }
     set {
-      pos = newValue.origin
-      size = newValue.size
+      pos.value = newValue.origin
+      size.value = newValue.size
     }
   }
 }
@@ -47,12 +47,12 @@ public protocol WindowEventType: EventType {
   var external: Bool { get }
 }
 
-public struct WindowCreatedEvent: EventType {
+public struct WindowCreatedEvent: WindowEventType {
   public var external: Bool
   public var window: WindowType
 }
 
-public struct WindowDestroyedEvent: EventType {
+public struct WindowDestroyedEvent: WindowEventType {
   public var external: Bool
   public var window: WindowType
 }

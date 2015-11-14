@@ -1,186 +1,129 @@
 import AXSwift
 import PromiseKit
 
-// An ugly workaround for the fact that you can't have generic protocols in Swift: a not-so-abstract
-// class.
-public class Property<Type> {
-  public var value: Type { fatalError("not implemented") }
-
-  public func refresh() -> Promise<Type> { fatalError("not implemented") }
-
-  private init() { }
-}
-
-public class WriteableProperty<Type>: Property<Type> {
-  override public var value: Type {
-    get { fatalError("not implemented") }
-    set { fatalError("not implemented") }
-  }
-
-  public func set(value: Type) -> Promise<Type> { fatalError("not implemented") }
-}
-
-// DELEGATE PATTERN, IT MUST BE
-// writeValue -> Promise
-// refreshValue -> Promise
-// readInitialValue -> Promise<Type?>
-// 
-// on Property:
-// internal var delegate - this won't be typesafe ???
-// initializeValue (for external caller)
-
-// or, maybe we just need to accept more repetition in OSXWindow with private type / public proxy
-
-
-//public protocol PropertyType {
-//  typealias Type
-//
-//  var value: Type { get }
-//
-//  func refresh() -> Promise<Type>
-//
-//  // func onChange(handler: WindowPropertyEventType)
-//}
-//
-//public protocol WriteablePropertyType: PropertyType {
-//  var value: Type { get set }
-//
-//  func set(value: Type) -> Promise<Type>
-//  // func setNoVerify(value: Type) -> Promise<Void>
-//}
-
 protocol WindowPropertyNotifier: class {
-  func notify<Event: WindowPropertyEventInternalType>(event: Event.Type, external: Bool, oldValue: Event.PropertyType, newValue: Event.PropertyType)
+  func notify<Event: WindowPropertyEventTypeInternal>(event: Event.Type, external: Bool, oldValue: Event.PropertyType, newValue: Event.PropertyType)
   func notifyInvalid()
 }
 
-// Since we have to use classes for differentiating read-only from read-write properties, we can't
-// derive from the actual implementation read-only class in order to implement the read-write
-// implementation (Swift doesn't have multiple class inheritance). So instead, I made this lovely
-// protocol extension that mixes in the functionality. It avoids repetition of actual code, but
-// adds a lot of redundancy to the class configurations...
-protocol AXProp: class {
-  typealias Type: Equatable
-  typealias EventT: WindowPropertyEventInternalType
-  typealias UIElement: UIElementType
+protocol PropertyDelegate {
+  typealias T: Equatable
+  func writeValue(newValue: T) throws
+  func readValue() throws -> T
 
-  var notifier: WindowPropertyNotifier! { get }
-  var axElement: UIElement { get }
-  var attribute: AXSwift.Attribute { get }
-  var value_: Type! { get set }
+  // Returns a promise of the property's initial value. It's the responsibility of whoever defines
+  // the property to ensure that the property is not accessed before this promise resolves.
+  // We could make this optional and use `readValue()` otherwise.
+  func initialize() -> Promise<T>
 }
-extension AXProp where EventT.PropertyType == Type {
-  // Window will initialize all values from a single getMultipleAttributes call instead of issuing
-  // a bunch of individual calls. Before this is called, the property MUST NOT be used.
-  func initializeValue(value: Type) {
-    assert(value_ == nil, "Property for AX attribute \(attribute) was re-initialized")
-    value_ = value
-  }
-  func initializeValue(value: Any) {
-    initializeValue(value as! Type)
+
+// If the underlying UI object becomes invalid, throw a PropertyError.Invalid which wraps a public
+// error type from your delegate. The unwrapped error will be presented to the user.
+enum PropertyError: ErrorType {
+  case Invalid(error: ErrorType)
+}
+
+public class Property<Type: Equatable> {
+  private var value_: Type!
+  public var value: Type { return value_ }
+
+  private var notifier: PropertyNotifierThunk<Type>
+  private var delegate_: PropertyDelegateThunk<Type>
+  private(set) var delegate: Any
+
+  init<Event: WindowPropertyEventTypeInternal, Impl: PropertyDelegate where Event.PropertyType == Type, Impl.T == Type>(_ eventType: Event.Type, _ notifier: WindowPropertyNotifier, _ delegate: Impl) {
+    self.notifier = PropertyNotifierThunk<Type>(eventType, notifier)
+    self.delegate = delegate
+    self.delegate_ = PropertyDelegateThunk(delegate)
+    delegate.initialize().then { value in
+      self.value_ = value
+    }
   }
 
-  private func refresh_() -> Promise<Type> {
+  public func refresh() -> Promise<Type> {
     return Promise<Void>().thenInBackground({
-      // TODO deal with optional attributes
-      let newValue: Type = try self.axElement.attribute(self.attribute)!
-      self.updateFromSystem(newValue)
-      return newValue
-      } as () throws -> Type)  // type inference gets confused without this, for some reason
-  }
-
-  func updateFromSystem(newValue: Type) {
-    if value_ != newValue {
-      let oldVal = value_
-      value_ = newValue
-      notifier.notify(EventT.self, external: true, oldValue: oldVal, newValue: newValue)
-    }
-  }
-}
-
-class AXProperty<
-  Type: Equatable, Event: WindowPropertyEventInternalType, UIElement: UIElementType where Event.PropertyType == Type
->: Property<Type>, AXProp {
-  // I DON'T UNDERSTAND why we can't just use Event, some Swift bug.
-  typealias EventT = Event
-
-  weak var notifier: WindowPropertyNotifier!
-  let axElement: UIElement
-  let attribute: AXSwift.Attribute
-
-
-  init(_ axElement: UIElement, _ attribute: AXSwift.Attribute, notifier: WindowPropertyNotifier) {
-    self.axElement = axElement
-    self.attribute = attribute
-    self.notifier = notifier
-  }
-
-  var value_: Type!
-  override var value: Type { return value_ }
-
-  override func refresh() -> Promise<Type> {
-    return refresh_()
-  }
-}
-
-class AXWriteableProperty<
-    Type: Equatable, Event: WindowPropertyEventInternalType, UIElement: UIElementType where Event.PropertyType == Type
->: WriteableProperty<Type>, AXProp {
-  typealias EventT = Event
-
-  weak var notifier: WindowPropertyNotifier!
-  let axElement: UIElement
-  let attribute: AXSwift.Attribute
-
-  init(_ axElement: UIElement, _ attribute: AXSwift.Attribute, notifier: WindowPropertyNotifier) {
-    self.axElement = axElement
-    self.attribute = attribute
-    self.notifier = notifier
-  }
-
-  var value_: Type!
-  override var value: Type {
-    get { return value_ }
-    set {
       do {
-        try doSet(newValue)
-      } catch {
-        // errors are handled in doSet; no way to continue propagating them here
+        let oldValue = self.value_
+        self.value_ = try self.delegate_.readValue()
+        if self.value_ != oldValue {
+          self.notifier.notify(external: true, oldValue: oldValue, newValue: self.value_)
+        }
+        return self.value_
+      } catch PropertyError.Invalid(let wrappedError) {
+        self.notifier.notifyInvalid()
+        throw wrappedError
       }
-    }
+    } as () throws -> Type)  // type inference gets confused without this, for some reason
+    // TODO handle invalid
+  }
+}
+
+public class WriteableProperty<Type: Equatable>: Property<Type> {
+  override public var value: Type {
+    get { return value_ }
+    set { set(newValue) }
   }
 
-  override func refresh() -> Promise<Type> {
-    return refresh_()
+  override init<Event: WindowPropertyEventTypeInternal, Impl: PropertyDelegate where Event.PropertyType == Type, Impl.T == Type>(_ eventType: Event.Type, _ notifier: WindowPropertyNotifier, _ delegate: Impl) {
+    super.init(eventType, notifier, delegate)
   }
 
-  override func set(newValue: Type) -> Promise<Type> {
-    return Promise<Void>().thenInBackground {
-      return try self.doSet(newValue)
-    }
-  }
+  public func set(newValue: Type) -> Promise<Type> {
+    return Promise<Void>().thenInBackground({
+      do {
+        try self.delegate_.writeValue(newValue)
+        let actual = try self.delegate_.readValue()
 
-  func doSet(newValue: Type) throws -> Type {
-    // TODO: purge all events for this attribute? otherwise a notification could come through with an old value.
-    do {
-      try axElement.setAttribute(attribute, value: newValue)
-      // Ask for the new value to find out what actually resulted
-      let actual: Type = try axElement.attribute(attribute)!
-      if value_ != actual {
-        let oldVal = value_
-        value_ = actual
-        notifier.notify(Event.self, external: false, oldValue: oldVal, newValue: value_)
+        if actual != self.value_ {
+          let oldValue = self.value_
+          self.value_ = actual
+          self.notifier.notify(external: false, oldValue: oldValue, newValue: actual)
+        }
+
+        return actual
+      } catch PropertyError.Invalid(let wrappedError) {
+        self.notifier.notifyInvalid()
+        throw wrappedError
       }
-      return actual
-    } catch AXSwift.Error.InvalidUIElement {
-      notifier.notifyInvalid()
-      throw AXSwift.Error.InvalidUIElement
-    } catch {
-      // TODO: handle kAXErrorIllegalArgument, kAXErrorAttributeUnsupported, kAXErrorCannotComplete, kAXErrorNotImplemented
-      unexpectedError(error, onElement: axElement)
-      notifier.notifyInvalid()
-      // Probably shouldn't rethrow here, just abort?
-      throw error
+    } as () throws -> (Type))
+  }
+}
+
+// Because Swift doesn't have generic protocols, we have to use these ugly thunks to simulate them.
+// Hopefully this will be addressed in a future Swift release.
+
+private struct PropertyDelegateThunk<Type: Equatable>: PropertyDelegate {
+  init<Impl: PropertyDelegate where Impl.T == Type>(_ impl: Impl) {
+    writeValue_ = impl.writeValue
+    readValue_ = impl.readValue
+    initialize_ = impl.initialize
+  }
+
+  let writeValue_: (newValue: Type) throws -> ()
+  let readValue_: () throws -> Type
+  let initialize_: () -> Promise<Type>
+
+  func writeValue(newValue: Type) throws { try writeValue_(newValue: newValue) }
+  func readValue() throws -> Type { return try readValue_() }
+  func initialize() -> Promise<Type> { return initialize_() }
+}
+
+class PropertyNotifierThunk<PropertyType: Equatable> {
+  let wrappedNotifier: WindowPropertyNotifier
+  let notify_: (external: Bool, oldValue: PropertyType, newValue: PropertyType) -> ()
+
+  init<Event: WindowPropertyEventTypeInternal where Event.PropertyType == PropertyType>(_ eventType: Event.Type, _ wrappedNotifier: WindowPropertyNotifier) {
+    self.wrappedNotifier = wrappedNotifier
+
+    notify_ = { (external: Bool, oldValue: PropertyType, newValue: PropertyType) in
+      wrappedNotifier.notify(Event.self, external: external, oldValue: oldValue, newValue: newValue)
     }
+  }
+
+  func notify(external external: Bool, oldValue: PropertyType, newValue: PropertyType) {
+    notify_(external: external, oldValue: oldValue, newValue: newValue)
+  }
+  func notifyInvalid() {
+    wrappedNotifier.notifyInvalid()
   }
 }

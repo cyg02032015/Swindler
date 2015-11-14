@@ -3,6 +3,7 @@ import Nimble
 
 @testable import Swindler
 import AXSwift
+import PromiseKit
 
 class TestUIElement: UIElementType, Hashable {
   static var elementCount: Int = 0
@@ -185,7 +186,7 @@ class OSXDriverSpec: QuickSpec {
         }
 
         it("reads the window's properties into the state") {
-          expect(state.visibleWindows.first!.pos).to(equal(CGPoint(x: 5, y: 5)))
+          expect(state.visibleWindows.first!.pos.value).to(equal(CGPoint(x: 5, y: 5)))
         }
 
         it("emits WindowCreatedEvent") {
@@ -259,7 +260,7 @@ class OSXDriverSpec: QuickSpec {
 
         it("property value equals event.newVal") {
           state.on { (event: WindowPosChangedEvent) in
-            expect(event.window.pos).to(equal(event.newVal))
+            expect(event.window.pos.value).to(equal(event.newVal))
           }
           windowElement.attrs[.Position] = CGPoint(x: 100, y: 100)
           observer.emit(.Moved, forElement: windowElement)
@@ -326,7 +327,7 @@ class OSXWindowSpec: QuickSpec {
 
           expect {
             try Window(notifier: TestNotifier(), axElement: windowElement, observer: TestObserver())
-          }.to(throwError(OSXDriverError.MissingAttributes))
+          }.to(throwError(OSXDriverError.MissingAttribute))
         }
       }
     }
@@ -345,7 +346,7 @@ class TestWindowPropertyNotifier: WindowPropertyNotifier {
   var events: [Event] = []
   var stillValid = true
 
-  func notify<EventT: WindowPropertyEventInternalType>(event: EventT.Type, external: Bool, oldValue: EventT.PropertyType, newValue: EventT.PropertyType) {
+  func notify<EventT: WindowPropertyEventType>(event: EventT.Type, external: Bool, oldValue: EventT.PropertyType, newValue: EventT.PropertyType) {
     events.append(Event(type: event, external: external, oldValue: oldValue, newValue: newValue))
   }
   func notifyInvalid() {
@@ -357,15 +358,16 @@ class AXPropertySpec: QuickSpec {
   override func spec() {
 
     // Set up a state with a single application containing a single window.
-    var property: AXReadWriteProperty<CGPoint, WindowPosChangedEvent, TestUIElement>!
+    var property: WriteableProperty<CGPoint, WindowPosChangedEvent>!
     var windowElement: TestWindow!
     var notifier: TestWindowPropertyNotifier!
     beforeEach {
+      let position = CGPoint(x: 5, y: 5)
       windowElement = TestWindow(forApp: TestApplication())
+      windowElement.attrs[.Position] = position
+      let initPromise = Promise<[AXSwift.Attribute: Any]>([.Position: position])
       notifier = TestWindowPropertyNotifier()
-      property = AXReadWriteProperty(windowElement, .Position, notifier: notifier)
-      property.initializeValue(CGPoint(x: 5, y: 5))
-      windowElement.attrs[.Position] = property.value
+      property = WriteableProperty(notifier, AXPropertyDelegate(windowElement, .Position, initPromise))
     }
 
     describe("refresh") {

@@ -38,8 +38,14 @@ extension AXSwift.Application: ApplicationType {
 
 // MARK: - Internal protocols
 
-protocol Notifier: class {
+protocol EventNotifier: class {
   func notify<Event: EventType>(event: Event)
+}
+
+// MARK: - Errors
+
+enum OSXDriverError: ErrorType {
+  case MissingAttribute
 }
 
 // MARK: - Implementation
@@ -47,7 +53,7 @@ protocol Notifier: class {
 class OSXState<
     UIElement: UIElementType, Application: ApplicationType, Observer: ObserverType
     where Observer.UIElement == UIElement, Application.UIElement == UIElement
->: StateType, Notifier {
+>: StateType, EventNotifier {
   typealias Window = OSXWindow<UIElement, Application, Observer>
   var applications: [Application] = []
   var observers: [Observer] = []
@@ -146,23 +152,13 @@ class OSXState<
   }
 }
 
-enum OSXDriverError: ErrorType {
-  case MissingAttributes
-}
-
-protocol AXPropertyType {
-  var attribute: AXSwift.Attribute { get }
+private protocol PropertyType {
   func refresh()
-  func initializeValue(value: Any)
+  var delegate: Any { get }
 }
-extension AXProperty: AXPropertyType {
+extension Property: PropertyType {
   func refresh() {
-    let _: Promise<Type> = refresh()
-  }
-}
-extension AXWriteableProperty: AXPropertyType {
-  func refresh() {
-    let _: Promise<Type> = refresh()
+    let _: Promise<Type> = self.refresh()
   }
 }
 
@@ -171,19 +167,43 @@ class OSXWindow<
     where Observer.UIElement == UIElement, Application.UIElement == UIElement
 >: WindowType, WindowPropertyNotifier {
   typealias State = OSXState<UIElement, Application, Observer>
-  let notifier: Notifier
+  let notifier: EventNotifier
   let axElement: UIElement
 
-  init(notifier: Notifier, axElement: UIElement, observer: Observer) throws {
+  private(set) var valid: Bool = true
+
+  var pos: WriteableProperty<CGPoint>!
+  var size: WriteableProperty<CGSize>!
+  var title: Property<String>!
+
+  private var watchedAxProperties: [AXSwift.Notification: PropertyType]!
+
+  init(notifier: EventNotifier, axElement: UIElement, observer: Observer) throws {
     self.notifier = notifier
     self.axElement = axElement
 
-    try loadAttributes()
+    let (initPromise, fulfill, _) = Promise<[AXSwift.Attribute: Any]>.pendingPromise()
 
+    pos = WriteableProperty(WindowPosChangedEvent.self, self, AXPropertyDelegate(axElement, .Position, initPromise))
+    size = WriteableProperty(WindowSizeChangedEvent.self, self, AXPropertyDelegate(axElement, .Size, initPromise))
+    title = Property(WindowTitleChangedEvent.self, self, AXPropertyDelegate(axElement, .Title, initPromise))
+
+    watchedAxProperties = [
+      .Moved: pos,
+      .Resized: size,
+      .TitleChanged: title
+    ]
+
+    let axProperties = watchedAxProperties.values
+    let attrNames: [Attribute] = axProperties.map({ ($0.delegate as! AXPropertyDelegateType).attribute })
+    let attributes = try axElement.getMultipleAttributes(attrNames)
+
+    fulfill(attributes)
+
+    for notification in watchedAxProperties.keys {
+      try observer.addNotification(notification, forElement: axElement)
+    }
     try observer.addNotification(.UIElementDestroyed, forElement: axElement)
-    try observer.addNotification(.Moved, forElement: axElement)
-    try observer.addNotification(.Resized, forElement: axElement)
-    try observer.addNotification(.TitleChanged, forElement: axElement)
   }
 
   func handleEvent(event: AXSwift.Notification, observer: Observer) {
@@ -199,47 +219,67 @@ class OSXWindow<
     }
   }
 
-  private(set) var valid: Bool = true
-
-  var pos: AXWriteableProperty<CGPoint, WindowPosChangedEvent, UIElement>
-  var size: AXWriteableProperty<CGSize, WindowSizeChangedEvent, UIElement>
-  var title: AXProperty<String, WindowTitleChangedEvent, UIElement>
-
-  var watchedAxProperties: [AXSwift.Notification: AXPropertyType]
-
-  private func loadAttributes() throws {
-    pos = AXWriteableProperty(axElement, .Position, notifier: self)
-    size = AXWriteableProperty(axElement, .Size, notifier: self)
-    title = AXProperty(axElement, .Title, notifier: self)
-
-    watchedAxProperties = [
-      .Moved: pos,
-      .Resized: size,
-      .TitleChanged: title
-    ]
-
-    let axProperties = watchedAxProperties.values
-    let attrNames: [Attribute] = axProperties.map({ $0.attribute })
-    let attributes = try axElement.getMultipleAttributes(attrNames)
-
-    axProperties.forEach { property in
-      if let value = attributes[property.attribute] {
-        property.initializeValue(value)
-      }
-    }
-
-    guard attributes.count == attrNames.count else {
-      print("Could not get required attributes for window. Wanted: \(attrNames). Got: \(attributes.keys)")
-      throw OSXDriverError.MissingAttributes
-    }
-  }
-
-  func notify<Event: WindowPropertyEventInternalType>(event: Event.Type, external: Bool, oldValue: Event.PropertyType, newValue: Event.PropertyType) {
+  func notify<Event: WindowPropertyEventTypeInternal>(event: Event.Type, external: Bool, oldValue: Event.PropertyType, newValue: Event.PropertyType) {
     notifier.notify(Event(external: external, window: self, oldVal: oldValue, newVal: newValue))
   }
 
   func notifyInvalid() {
     valid = false
+  }
+}
+
+protocol AXPropertyDelegateType {
+  var attribute: AXSwift.Attribute { get }
+}
+
+class AXPropertyDelegate<T: Equatable, UIElement: UIElementType>: PropertyDelegate, AXPropertyDelegateType {
+  typealias InitDict = [AXSwift.Attribute: Any]
+  let axElement: UIElement
+  let attribute: AXSwift.Attribute
+  let initPromise: Promise<InitDict>
+
+  init(_ axElement: UIElement, _ attribute: AXSwift.Attribute, _ initPromise: Promise<InitDict>) {
+    self.axElement = axElement
+    self.attribute = attribute
+    self.initPromise = initPromise
+  }
+
+  func readValue() throws -> T {
+    do {
+      // TODO: handle missing values
+      return try axElement.attribute(attribute)!
+    } catch AXSwift.Error.InvalidUIElement {
+      throw PropertyError.Invalid(error: AXSwift.Error.InvalidUIElement)
+    } catch let error {
+      // TODO: handle kAXErrorAttributeUnsupported, kAXErrorCannotComplete, kAXErrorNotImplemented
+      unexpectedError(error)
+      throw PropertyError.Invalid(error: error)
+    }
+  }
+
+  func writeValue(newValue: T) throws {
+    do {
+      try axElement.setAttribute(attribute, value: newValue)
+    } catch AXSwift.Error.InvalidUIElement {
+      throw PropertyError.Invalid(error: AXSwift.Error.InvalidUIElement)
+    } catch let error {
+      // TODO: handle kAXErrorIllegalArgument, kAXErrorAttributeUnsupported, kAXErrorCannotComplete, kAXErrorNotImplemented
+      unexpectedError(error)
+      throw PropertyError.Invalid(error: error)
+    }
+  }
+
+  // Returns a promise of the property's initial value. It's the responsibility of whoever defines
+  // the property to ensure that the property is not accessed before this promise resolves.
+  // We could make this optional and use `readValue()` otherwise.
+  func initialize() -> Promise<T> {
+    return initPromise.thenInBackground({ dict in
+      guard let value = dict[self.attribute] else {
+        print("Missing attribute \(self.attribute) on window element \(self.axElement)")
+        throw PropertyError.Invalid(error: OSXDriverError.MissingAttribute)
+      }
+      return value as! T
+    } as (InitDict) throws -> (T))
   }
 }
 

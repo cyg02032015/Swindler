@@ -6,11 +6,11 @@ public protocol StateType {
 public protocol WindowType {
   var valid: Bool { get }
 
-  var pos: WriteableProperty<CGPoint> { get }
-  var size: WriteableProperty<CGSize> { get }
+  var pos: WriteableProperty<CGPoint>! { get }
+  var size: WriteableProperty<CGSize>! { get }
 //  var rect: CGRect { get set }
 
-  var title: Property<String> { get }
+  var title: Property<String>! { get }
 }
 
 extension WindowType {
@@ -62,15 +62,14 @@ public protocol WindowPropertyEventType: WindowEventType {
 
   var oldVal: PropertyType { get }
   var newVal: PropertyType { get }
-
   // TODO: requestedVal?
 }
 
-protocol WindowPropertyEventInternalType: WindowPropertyEventType {
+protocol WindowPropertyEventTypeInternal: WindowPropertyEventType {
   init(external: Bool, window: WindowType, oldVal: PropertyType, newVal: PropertyType)
 }
 
-public struct WindowPosChangedEvent: WindowPropertyEventInternalType {
+public struct WindowPosChangedEvent: WindowPropertyEventTypeInternal {
   public typealias PropertyType = CGPoint
   public var external: Bool
   public var window: WindowType
@@ -78,7 +77,7 @@ public struct WindowPosChangedEvent: WindowPropertyEventInternalType {
   public var newVal: PropertyType
 }
 
-public struct WindowSizeChangedEvent: WindowPropertyEventInternalType {
+public struct WindowSizeChangedEvent: WindowPropertyEventTypeInternal {
   public typealias PropertyType = CGSize
   public var external: Bool
   public var window: WindowType
@@ -86,7 +85,7 @@ public struct WindowSizeChangedEvent: WindowPropertyEventInternalType {
   public var newVal: PropertyType
 }
 
-public struct WindowTitleChangedEvent: WindowPropertyEventInternalType {
+public struct WindowTitleChangedEvent: WindowPropertyEventTypeInternal {
   public typealias PropertyType = String
   public var external: Bool
   public var window: WindowType

@@ -35,10 +35,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     dispatchAfter(10.0) {
-      for var window in self.swindler.visibleWindows {
+      for window in self.swindler.visibleWindows {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)) {
           print("resizing \(window.title)")
-          window.size = CGSize(width: 200, height: 200)
+          window.size.value = CGSize(width: 200, height: 200)
           print("done with \(window.title), valid: \(window.valid)")
         }
       }

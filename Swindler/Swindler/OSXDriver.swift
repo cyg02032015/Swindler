@@ -95,12 +95,10 @@ class OSXState<
   }
 
   private func onWindowCreated(windowElement: UIElement, observer: Observer) {
-    do {
-      let window = try Window(notifier: self, axElement: windowElement, observer: observer)
-      windows.append(window)
-      // TODO: wait until window is ready
-      notify(WindowCreatedEvent(external: true, window: window))
-    } catch {
+    Window.initialize(notifier: self, axElement: windowElement, observer: observer).then({ window in
+      self.windows.append(window)
+      self.notify(WindowCreatedEvent(external: true, window: window))
+    } as (Window) -> ()).error { error in
       // TODO: handle timeouts
       print("Error: Could not watch [\(windowElement)]: \(error)")
       assert(error is AXSwift.Error || error is OSXDriverError)
@@ -152,9 +150,11 @@ class OSXState<
   }
 }
 
-private protocol PropertyType {
+// Making this private = compiler segfault
+protocol PropertyType {
   func refresh()
   var delegate: Any { get }
+  var initialized: Promise<Void> { get }
 }
 extension Property: PropertyType {
   func refresh() {
@@ -178,6 +178,7 @@ class OSXWindow<
 
   private var watchedAxProperties: [AXSwift.Notification: PropertyType]!
 
+  // Do not use -- internal for testing only
   init(notifier: EventNotifier, axElement: UIElement, observer: Observer) throws {
     self.notifier = notifier
     self.axElement = axElement
@@ -204,6 +205,17 @@ class OSXWindow<
       try observer.addNotification(notification, forElement: axElement)
     }
     try observer.addNotification(.UIElementDestroyed, forElement: axElement)
+  }
+
+  static func initialize(notifier notifier: EventNotifier, axElement: UIElement, observer: Observer) -> Promise<OSXWindow> {
+    return Promise { fulfill, reject in
+      let window = try OSXWindow(notifier: notifier, axElement: axElement, observer: observer)
+      let axProperties = window.watchedAxProperties.values
+      let attrPromises = axProperties.map({ $0.initialized })
+      when(Array(attrPromises)).then {
+        fulfill(window)
+      }
+    }
   }
 
   func handleEvent(event: AXSwift.Notification, observer: Observer) {

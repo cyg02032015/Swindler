@@ -25,19 +25,24 @@ enum PropertyError: ErrorType {
 
 public class Property<Type: Equatable> {
   private var value_: Type!
-  public var value: Type { return value_ }
-
   private var notifier: PropertyNotifierThunk<Type>
   private var delegate_: PropertyDelegateThunk<Type>
+
+  public var value: Type { return value_ }
   private(set) var delegate: Any
+  private(set) var initialized: Promise<Void>
 
   init<Event: WindowPropertyEventTypeInternal, Impl: PropertyDelegate where Event.PropertyType == Type, Impl.T == Type>(_ eventType: Event.Type, _ notifier: WindowPropertyNotifier, _ delegate: Impl) {
     self.notifier = PropertyNotifierThunk<Type>(eventType, notifier)
     self.delegate = delegate
     self.delegate_ = PropertyDelegateThunk(delegate)
-    delegate.initialize().then { value in
+
+    let (initialized, fulfill, _) = Promise<Void>.pendingPromise()
+    self.initialized = initialized
+    delegate.initialize().then({ value in
       self.value_ = value
-    }
+      fulfill()
+    })
   }
 
   public func refresh() -> Promise<Type> {
@@ -82,8 +87,12 @@ public class WriteableProperty<Type: Equatable>: Property<Type> {
 
         return actual
       } catch PropertyError.Invalid(let wrappedError) {
+        print("Marking invalid")
         self.notifier.notifyInvalid()
         throw wrappedError
+      } catch {
+        print("error caught: \(error)")
+        throw error
       }
     } as () throws -> (Type))
   }

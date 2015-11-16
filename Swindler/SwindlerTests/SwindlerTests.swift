@@ -172,6 +172,9 @@ class OSXDriverSpec: QuickSpec {
       }
 
       context("when a window is created") {
+        beforeEach {
+          expect(state.visibleWindows.count).toEventually(equal(1))
+        }
 
         it("watches for events on the window") {
           expect(observer.watchedElements[windowElement]).toNot(beNil())
@@ -197,6 +200,7 @@ class OSXDriverSpec: QuickSpec {
 
           let window = TestWindow(forApp: app)
           observer.emit(.WindowCreated, forElement: window)
+          expect(state.visibleWindows.count).toEventually(equal(2))
           expect(callbacks).to(equal(1), description: "callback should be called once")
         }
 
@@ -204,7 +208,10 @@ class OSXDriverSpec: QuickSpec {
 
       context("when a window is destroyed") {
         var window: WindowType!
-        beforeEach { window = state.visibleWindows.first! }
+        beforeEach {
+          expect(state.visibleWindows.count).toEventually(equal(1))
+          window = state.visibleWindows.first!
+        }
 
         it("is marked as invalid") {
           observer.emit(.UIElementDestroyed, forElement: windowElement)
@@ -307,7 +314,7 @@ class OSXDriverSpec: QuickSpec {
   }
 }
 
-class TestNotifier: Notifier {
+class TestNotifier: EventNotifier {
   var events: [EventType] = []
   func notify<Event: EventType>(event: Event) {
     events.append(event)
@@ -358,7 +365,7 @@ class AXPropertySpec: QuickSpec {
   override func spec() {
 
     // Set up a state with a single application containing a single window.
-    var property: WriteableProperty<CGPoint, WindowPosChangedEvent>!
+    var property: WriteableProperty<CGPoint>!
     var windowElement: TestWindow!
     var notifier: TestWindowPropertyNotifier!
     beforeEach {
@@ -367,7 +374,12 @@ class AXPropertySpec: QuickSpec {
       windowElement.attrs[.Position] = position
       let initPromise = Promise<[AXSwift.Attribute: Any]>([.Position: position])
       notifier = TestWindowPropertyNotifier()
-      property = WriteableProperty(notifier, AXPropertyDelegate(windowElement, .Position, initPromise))
+      property = WriteableProperty(WindowPosChangedEvent.self, notifier, AXPropertyDelegate(windowElement, .Position, initPromise))
+      waitUntil { done in
+        property.initialized.then {
+          done()
+        }
+      }
     }
 
     describe("refresh") {
@@ -383,23 +395,23 @@ class AXPropertySpec: QuickSpec {
 
       it("updates the property value") {
         property.value = CGPoint(x: 100, y: 100)
-        expect(property.value).to(equal(CGPoint(x: 100, y: 100)))
+        expect(property.value).toEventually(equal(CGPoint(x: 100, y: 100)))
       }
 
       it("changes the property on the UIElement") {
         property.value = CGPoint(x: 100, y: 100)
         expect(windowElement.attrs[.Position]! is CGPoint).to(beTrue())
-        expect(windowElement.attrs[.Position]! as? CGPoint).to(equal(CGPoint(x: 100, y: 100)))
+        expect(windowElement.attrs[.Position]! as? CGPoint).toEventually(equal(CGPoint(x: 100, y: 100)))
       }
 
       it("emits a ChangedEvent") {
         property.value = CGPoint(x: 100, y: 100)
-        expect(notifier.events.count).to(equal(1))
+        expect(notifier.events.count).toEventually(equal(1))
       }
 
       it("includes the correct oldVal and newVal in the event") {
         property.value = CGPoint(x: 100, y: 100)
-        if let event = notifier.events.first {
+        if let event = waitFor(notifier.events.first) {
           expect(event.oldValue as? CGPoint).to(equal(CGPoint(x: 5, y: 5)))
           expect(event.newValue as? CGPoint).to(equal(CGPoint(x: 100, y: 100)))
         }
@@ -407,7 +419,7 @@ class AXPropertySpec: QuickSpec {
 
       it("marks the event as internal") {
         property.value = CGPoint(x: 100, y: 100)
-        if let event = notifier.events.first {
+        if let event = waitFor(notifier.events.first) {
           expect(event.external).to(beFalse())
         }
       }
@@ -425,17 +437,20 @@ class AXPropertySpec: QuickSpec {
         }
 
         it("emits a WindowInvalidEvent") {
-          property.value = CGPoint(x: 100, y: 100)
-          expect(notifier.stillValid).to(beFalse())
+          return property.set(CGPoint(x: 100, y: 100)).always {
+            expect(notifier.stillValid).to(beFalse())
+          }.error { _ in }
         }
 
         it("does not update the property value, but still allows reading") {
           property.value = CGPoint(x: 100, y: 100)
+          waitUntil(property.value == CGPoint(x: 100, y: 100))
           expect(property.value).to(equal(CGPoint(x: 5, y: 5)))
         }
 
         it("does not emit a ChangedEvent") {
           property.value = CGPoint(x: 100, y: 100)
+          waitUntil(property.value == CGPoint(x: 100, y: 100))
           expect(notifier.events.count).to(equal(0))
         }
 
@@ -443,4 +458,32 @@ class AXPropertySpec: QuickSpec {
     }
 
   }
+}
+
+func waitUntil(@autoclosure(escaping) expression: () throws -> Bool) {
+  expect(try expression()).toEventually(beTrue())
+}
+func waitFor<T>(@autoclosure(escaping) expression: () throws -> T?) -> T? {
+  expect(try expression()).toEventuallyNot(beNil())
+  do {
+    let result = try expression()
+    return result!
+  } catch {
+    fail("Error thrown while retrieving value: \(error)")
+    return nil
+  }
+}
+
+func it<T>(desc: String, timeout: NSTimeInterval = 1.0, file: String = __FILE__, line: UInt = __LINE__, f: () -> Promise<T>) {
+  it(desc, file: file, line: line, closure: {
+    let promise = f()
+    waitUntil(timeout: timeout, file: file, line: line) { done in
+      promise.then { _ in
+        done()
+      }.error { error in
+        fail("Promise failed with error \(error)", file: file, line: line)
+        done()
+      }
+    }
+  } as () -> ())
 }

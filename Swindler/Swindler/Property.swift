@@ -37,29 +37,39 @@ public class Property<Type: Equatable> {
     self.delegate = delegate
     self.delegate_ = PropertyDelegateThunk(delegate)
 
-    let (initialized, fulfill, _) = Promise<Void>.pendingPromise()
+    // Must initialize `initialized` before capturing self in a closure, so do it this way.
+    let (initialized, fulfill, reject) = Promise<Void>.pendingPromise()
     self.initialized = initialized
-    delegate.initialize().then({ value in
+    delegate.initialize().then { (value: Type) -> () in
       self.value_ = value
       fulfill()
-    })
+    }.error { error in
+      if case PropertyError.Invalid(let wrappedError) = error {
+        reject(wrappedError)
+      } else {
+        reject(error)
+      }
+    }
   }
 
   public func refresh() -> Promise<Type> {
-    return Promise<Void>().thenInBackground({
-      do {
+    return Promise<Void>().thenInBackground {
+      return try self.delegate_.readValue()
+    }.then({ actual in
+      if self.value_ != actual {
         let oldValue = self.value_
-        self.value_ = try self.delegate_.readValue()
-        if self.value_ != oldValue {
-          self.notifier.notify(external: true, oldValue: oldValue, newValue: self.value_)
-        }
-        return self.value_
+        self.value_ = actual
+        self.notifier.notify(external: true, oldValue: oldValue, newValue: self.value_)
+      }
+      return self.value_
+    } as (Type) throws -> Type).recover({ error in
+      do {
+        throw error
       } catch PropertyError.Invalid(let wrappedError) {
         self.notifier.notifyInvalid()
         throw wrappedError
       }
-    } as () throws -> Type)  // type inference gets confused without this, for some reason
-    // TODO handle invalid
+    } as (ErrorType) throws -> Type)
   }
 }
 
@@ -75,26 +85,24 @@ public class WriteableProperty<Type: Equatable>: Property<Type> {
 
   public func set(newValue: Type) -> Promise<Type> {
     return Promise<Void>().thenInBackground({
-      do {
-        try self.delegate_.writeValue(newValue)
-        let actual = try self.delegate_.readValue()
-
-        if actual != self.value_ {
-          let oldValue = self.value_
-          self.value_ = actual
-          self.notifier.notify(external: false, oldValue: oldValue, newValue: actual)
-        }
-
-        return actual
-      } catch PropertyError.Invalid(let wrappedError) {
-        print("Marking invalid")
+      try self.delegate_.writeValue(newValue)
+      return try self.delegate_.readValue()
+    } as () throws -> Type).then({ actual in
+      if actual != self.value_ {
+        let oldValue = self.value_
+        self.value_ = actual
+        self.notifier.notify(external: false, oldValue: oldValue, newValue: actual)
+      }
+      return actual
+    } as (Type) -> Type).recover({ error in
+      switch error {
+      case PropertyError.Invalid(let wrappedError):
         self.notifier.notifyInvalid()
         throw wrappedError
-      } catch {
-        print("error caught: \(error)")
+      default:
         throw error
       }
-    } as () throws -> (Type))
+    } as (ErrorType) throws -> Type)
   }
 }
 

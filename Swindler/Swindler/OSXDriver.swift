@@ -183,37 +183,54 @@ class OSXWindow<
     self.notifier = notifier
     self.axElement = axElement
 
+    // Create a promise for the attribute dictionary we'll get from getMultipleAttributes.
     let (initPromise, fulfill, _) = Promise<[AXSwift.Attribute: Any]>.pendingPromise()
 
+    // Initialize all properties.
     pos = WriteableProperty(WindowPosChangedEvent.self, self, AXPropertyDelegate(axElement, .Position, initPromise))
     size = WriteableProperty(WindowSizeChangedEvent.self, self, AXPropertyDelegate(axElement, .Size, initPromise))
     title = Property(WindowTitleChangedEvent.self, self, AXPropertyDelegate(axElement, .Title, initPromise))
 
+    // Map notifications to the corresponding property.
     watchedAxProperties = [
       .Moved: pos,
       .Resized: size,
       .TitleChanged: title
     ]
-
     let axProperties = watchedAxProperties.values
-    let attrNames: [Attribute] = axProperties.map({ ($0.delegate as! AXPropertyDelegateType).attribute })
-    let attributes = try axElement.getMultipleAttributes(attrNames)
 
-    fulfill(attributes)
-
+    // Start watching for notifications.
     for notification in watchedAxProperties.keys {
       try observer.addNotification(notification, forElement: axElement)
     }
     try observer.addNotification(.UIElementDestroyed, forElement: axElement)
+
+    // Asynchronously fetch the attribute values.
+    let attrNames: [Attribute] = axProperties.map({ ($0.delegate as! AXPropertyDelegateType).attribute })
+    Promise<Void>().thenInBackground {
+      return try axElement.getMultipleAttributes(attrNames)
+    }.then { attributes in
+      fulfill(attributes)
+    }.error { error in
+      // TODO: handle timeouts
+      unexpectedError(error, onElement: axElement)
+      self.notifyInvalid()
+    }
   }
 
   static func initialize(notifier notifier: EventNotifier, axElement: UIElement, observer: Observer) -> Promise<OSXWindow> {
-    return Promise { fulfill, reject in
+    return firstly {
       let window = try OSXWindow(notifier: notifier, axElement: axElement, observer: observer)
       let axProperties = window.watchedAxProperties.values
       let attrPromises = axProperties.map({ $0.initialized })
-      when(Array(attrPromises)).then {
-        fulfill(window)
+      return when(Array(attrPromises)).then { _ in window }
+    }.recover { (error: ErrorType) -> OSXWindow in
+      // Pass through errors wrapped by when
+      switch error {
+      case PromiseKit.Error.When(_, let wrappedError):
+        throw wrappedError
+      default:
+        throw error
       }
     }
   }

@@ -159,8 +159,9 @@ class OSXDriverSpec: QuickSpec {
       // Set up a state with a single application containing a single window.
       var app: TestApplication!
       var windowElement: TestWindow!
-      var state: OSXState<TestUIElement, TestApplication, FakeObserver>!
       var observer: FakeObserver!
+      var state: OSXState<TestUIElement, TestApplication, FakeObserver>!
+      var window: WindowType!
       beforeEach {
         app = TestApplication()
         windowElement = TestWindow(forApp: app)
@@ -169,6 +170,8 @@ class OSXDriverSpec: QuickSpec {
         state = OSXState<TestUIElement, TestApplication, FakeObserver>()
         observer = FakeObserver.observers.first!
         observer.emit(.WindowCreated, forElement: windowElement)
+        expect(state.visibleWindows.count).toEventually(equal(1))
+        window = state.visibleWindows.first!
       }
 
       context("when a window is created") {
@@ -207,11 +210,6 @@ class OSXDriverSpec: QuickSpec {
       }
 
       context("when a window is destroyed") {
-        var window: WindowType!
-        beforeEach {
-          expect(state.visibleWindows.count).toEventually(equal(1))
-          window = state.visibleWindows.first!
-        }
 
         it("is marked as invalid") {
           observer.emit(.UIElementDestroyed, forElement: windowElement)
@@ -244,16 +242,18 @@ class OSXDriverSpec: QuickSpec {
       }
 
       context("when a window property changes") {
+        // TODO: We depend on window.pos.refresh() here to ensure that an event has finished
+        // its own async refresh before checking conditions. This is necessary when testing that
+        // callbacks doesn't change. We are probably testing this at the wrong level of abstraction.
 
         it("emits a ChangedEvent") {
           var callbacks = 0
           state.on { (event: WindowPosChangedEvent) in
             callbacks++
           }
-          observer.emit(.WindowCreated, forElement: windowElement)
           windowElement.attrs[.Position] = CGPoint(x: 100, y: 100)
           observer.emit(.Moved, forElement: windowElement)
-          expect(callbacks).to(equal(1), description: "callback should be called once")
+          expect(callbacks).toEventually(equal(1), description: "callback should be called once")
         }
 
         it("includes the correct oldVal and newVal in the event") {
@@ -271,6 +271,7 @@ class OSXDriverSpec: QuickSpec {
           }
           windowElement.attrs[.Position] = CGPoint(x: 100, y: 100)
           observer.emit(.Moved, forElement: windowElement)
+          return window.pos.refresh()
         }
 
         it("marks the event as external") {
@@ -279,22 +280,26 @@ class OSXDriverSpec: QuickSpec {
           }
           windowElement.attrs[.Position] = CGPoint(x: 100, y: 100)
           observer.emit(.Moved, forElement: windowElement)
+          return window.pos.refresh()
         }
 
         context("when the event fires but the value is not changed") {
-          it("does not emit a ChangedEvent") {
+
+          it("does not emit a ChangedEvent", closure: {
             var callbacks = 0
             state.on { (event: WindowPosChangedEvent) in
               callbacks++
             }
-            observer.emit(.WindowCreated, forElement: windowElement)
             observer.emit(.Moved, forElement: windowElement)
-            expect(callbacks).to(equal(0), description: "callback should not be called")
-          }
+            return window.pos.refresh().then { _ in
+              expect(callbacks).to(equal(0), description: "callback should not be called")
+            }
+          } as () -> Promise<Void>)
+
         }
       }
 
-      it("calls multiple event handlers") {
+      it("calls multiple event handlers", closure: {
         var callbacks1 = 0
         var callbacks2 = 0
         state.on { (event: WindowPosChangedEvent) in
@@ -305,9 +310,11 @@ class OSXDriverSpec: QuickSpec {
         }
         windowElement.attrs[.Position] = CGPoint(x: 100, y: 100)
         observer.emit(.Moved, forElement: windowElement)
-        expect(callbacks1).to(equal(1), description: "callback1 should be called once")
-        expect(callbacks2).to(equal(1), description: "callback2 should be called once")
-      }
+        return window.pos.refresh().then({ _ in
+          expect(callbacks1).toEventually(equal(1), description: "callback1 should be called once")
+          expect(callbacks2).toEventually(equal(1), description: "callback2 should be called once")
+        } as (CGPoint) -> ())
+      } as () -> Promise<Void>)
 
     }
 
@@ -326,15 +333,21 @@ class OSXWindowSpec: QuickSpec {
 
     typealias Window = OSXWindow<TestUIElement, TestApplication, TestObserver>
 
-    describe("init") {
-      context("when called with a window that is missing attributes") {
-        it("throws an error") {
-          let windowElement = TestWindow(forApp: TestApplication.allApps.first!)
+    beforeEach { TestApplication.allApps = [] }
+
+    describe("initialize") {
+      fcontext("when called with a window that is missing attributes") {
+        it("returns an error") { () -> Promise<Void> in
+          let windowElement = TestWindow(forApp: TestApplication())
           windowElement.attrs.removeValueForKey(.Position)
 
-          expect {
-            try Window(notifier: TestNotifier(), axElement: windowElement, observer: TestObserver())
-          }.to(throwError(OSXDriverError.MissingAttribute))
+          let promise = Window.initialize(notifier: TestNotifier(), axElement: windowElement, observer: TestObserver())
+          return promise.asVoid().then({
+            fail("Expected to fail")
+          }).recover { (error: ErrorType) -> () in
+            expect(error is OSXDriverError).to(beTrue(), description: "expected OSXDriverError, got \(error)")
+            expect(error as? OSXDriverError).to(equal(OSXDriverError.MissingAttribute))
+          }
         }
       }
     }
@@ -394,40 +407,46 @@ class AXPropertySpec: QuickSpec {
     describe("when the value is set") {
 
       it("updates the property value") {
-        property.value = CGPoint(x: 100, y: 100)
-        expect(property.value).toEventually(equal(CGPoint(x: 100, y: 100)))
+        return property.set(CGPoint(x: 100, y: 100)).then({ _ in
+          expect(property.value).toEventually(equal(CGPoint(x: 100, y: 100)))
+        })
       }
 
       it("changes the property on the UIElement") {
-        property.value = CGPoint(x: 100, y: 100)
-        expect(windowElement.attrs[.Position]! is CGPoint).to(beTrue())
-        expect(windowElement.attrs[.Position]! as? CGPoint).toEventually(equal(CGPoint(x: 100, y: 100)))
+        return property.set(CGPoint(x: 100, y: 100)).then({ _ in
+          expect(windowElement.attrs[.Position]! is CGPoint).to(beTrue())
+          expect(windowElement.attrs[.Position]! as? CGPoint).to(equal(CGPoint(x: 100, y: 100)))
+        } as (CGPoint) -> ())
       }
 
       it("emits a ChangedEvent") {
-        property.value = CGPoint(x: 100, y: 100)
-        expect(notifier.events.count).toEventually(equal(1))
+        return property.set(CGPoint(x: 100, y: 100)).then { _ in
+          expect(notifier.events.count).to(equal(1))
+        }
       }
 
       it("includes the correct oldVal and newVal in the event") {
-        property.value = CGPoint(x: 100, y: 100)
-        if let event = waitFor(notifier.events.first) {
-          expect(event.oldValue as? CGPoint).to(equal(CGPoint(x: 5, y: 5)))
-          expect(event.newValue as? CGPoint).to(equal(CGPoint(x: 100, y: 100)))
-        }
+        return property.set(CGPoint(x: 100, y: 100)).then({ _ in
+          if let event = notifier.events.first {
+            expect(event.oldValue as? CGPoint).to(equal(CGPoint(x: 5, y: 5)))
+            expect(event.newValue as? CGPoint).to(equal(CGPoint(x: 100, y: 100)))
+          }
+        } as (CGPoint) -> ())
       }
 
       it("marks the event as internal") {
-        property.value = CGPoint(x: 100, y: 100)
-        if let event = waitFor(notifier.events.first) {
-          expect(event.external).to(beFalse())
-        }
+        return property.set(CGPoint(x: 100, y: 100)).then({ _ in
+          if let event = notifier.events.first {
+            expect(event.external).to(beFalse())
+          }
+        } as (CGPoint) -> ())
       }
 
       context("when the new value is the same as the old value") {
         it("does not emit a ChangedEvent") {
-          property.value = CGPoint(x: 5, y: 5)
-          expect(notifier.events.count).to(equal(0))
+          return property.set(CGPoint(x: 5, y: 5)).then { _ in
+            expect(notifier.events.count).to(equal(0))
+          }
         }
       }
 
@@ -436,54 +455,32 @@ class AXPropertySpec: QuickSpec {
           windowElement.throwInvalid = true
         }
 
-        it("emits a WindowInvalidEvent") {
+        it("returns an error", failOnError: false) {
+          return property.set(CGPoint(x: 100, y: 100)).then { _ in
+            fail("expected to return an error")
+          }
+        }
+
+        it("calls notifier.notifyInvalid()", failOnError: false) {
           return property.set(CGPoint(x: 100, y: 100)).always {
             expect(notifier.stillValid).to(beFalse())
-          }.error { _ in }
+          }
         }
 
-        it("does not update the property value, but still allows reading") {
-          property.value = CGPoint(x: 100, y: 100)
-          waitUntil(property.value == CGPoint(x: 100, y: 100))
-          expect(property.value).to(equal(CGPoint(x: 5, y: 5)))
+        it("does not update the property value, but still allows reading", failOnError: false) {
+          return property.set(CGPoint(x: 100, y: 100)).always {
+            expect(property.value).to(equal(CGPoint(x: 5, y: 5)))
+          }
         }
 
-        it("does not emit a ChangedEvent") {
-          property.value = CGPoint(x: 100, y: 100)
-          waitUntil(property.value == CGPoint(x: 100, y: 100))
-          expect(notifier.events.count).to(equal(0))
+        it("does not emit a ChangedEvent", failOnError: false) {
+          return property.set(CGPoint(x: 100, y: 100)).always {
+            expect(notifier.events.count).to(equal(0))
+          }
         }
 
       }
     }
 
   }
-}
-
-func waitUntil(@autoclosure(escaping) expression: () throws -> Bool) {
-  expect(try expression()).toEventually(beTrue())
-}
-func waitFor<T>(@autoclosure(escaping) expression: () throws -> T?) -> T? {
-  expect(try expression()).toEventuallyNot(beNil())
-  do {
-    let result = try expression()
-    return result!
-  } catch {
-    fail("Error thrown while retrieving value: \(error)")
-    return nil
-  }
-}
-
-func it<T>(desc: String, timeout: NSTimeInterval = 1.0, file: String = __FILE__, line: UInt = __LINE__, f: () -> Promise<T>) {
-  it(desc, file: file, line: line, closure: {
-    let promise = f()
-    waitUntil(timeout: timeout, file: file, line: line) { done in
-      promise.then { _ in
-        done()
-      }.error { error in
-        fail("Promise failed with error \(error)", file: file, line: line)
-        done()
-      }
-    }
-  } as () -> ())
 }

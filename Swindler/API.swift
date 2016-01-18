@@ -150,8 +150,11 @@ public protocol Window: Equatable {
 // TODO
 /// A physical display.
 public protocol Screen: Equatable {
-  /// The rectangle defining the screen boundaries in global coordinates. Note that these may be negative.
-  public var rect: CGRect { get }
+  /// The frame defining the screen boundaries in global coordinates. Note that x and y may be negative.
+  public var frame: CGRect { get }
+
+  /// The frame defining the screen boundaries in global coordinates, excluding the menu bar and dock.
+  public var frameForApplications: CGRect { get }
 
   /// The windows currently visible on this screen.
   public var visibleWindows: [Window] { get }
